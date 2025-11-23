@@ -13,10 +13,10 @@ const COUNTRY_FLAGS = {
   "Chile": "🇨🇱",
   "China": "🇨🇳",
   "Colombia": "🇨🇴",
+  "Costa Rica": "🇨🇷",
   "Czech Republic": "🇨🇿",
   "Denmark": "🇩🇰",
   "Egypt": "🇪🇬",
-  "Europe": "🇪🇺",
   "Finland": "🇫🇮",
   "France": "🇫🇷",
   "Germany": "🇩🇪",
@@ -63,6 +63,17 @@ const COUNTRY_FLAGS = {
   "Vietnam": "🇻🇳"
 };
 
+const REGION_FLAGS = {
+  "Australasia": "🌏",
+  "East Asia & Pacific": "🌏",
+  "Eastern Europe (Non-EU)": "🌍",
+  "Europe": "🇪🇺",
+  "North America": "🌎",
+  "South America": "🌎",
+  "Southeast Asia": "🌏",
+  "West Asia": "🌏",
+};
+
 function getCountryFlag(countryName) {
   if (!countryName) return null;
   
@@ -70,11 +81,23 @@ function getCountryFlag(countryName) {
   if (COUNTRY_FLAGS[countryName]) {
     return COUNTRY_FLAGS[countryName];
   }
+
+  if (REGION_FLAGS[countryName]) {
+    return REGION_FLAGS[countryName];
+  }
   
   // Try case-insensitive match
   const normalized = countryName.trim();
   for (const [country, flag] of Object.entries(COUNTRY_FLAGS)) {
     if (country.toLowerCase() === normalized.toLowerCase()) {
+      return flag;
+    }
+  }
+
+
+  // Try region match
+  for (const [region, flag] of Object.entries(REGION_FLAGS)) {
+    if (region.toLowerCase() === normalized.toLowerCase()) {
       return flag;
     }
   }

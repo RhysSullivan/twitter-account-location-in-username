@@ -619,6 +619,7 @@ async function addFlagToUsername(usernameElement, screenName) {
   // Add flag emoji - place it next to verification badge, before @ handle
   const flagSpan = document.createElement('span');
   flagSpan.textContent = ` ${flag}`;
+  flagSpan.title = location;
   flagSpan.setAttribute('data-twitter-flag', 'true');
   flagSpan.style.marginLeft = '4px';
   flagSpan.style.marginRight = '4px';
