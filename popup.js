@@ -12,6 +12,7 @@ const hiddenCountriesContainer = document.getElementById('hiddenCountries');
 const countryInput = document.getElementById('countryInput');
 const addCountryBtn = document.getElementById('addCountryBtn');
 const clearCountriesBtn = document.getElementById('clearCountries');
+const countrySuggestions = document.getElementById('countrySuggestions');
 
 function normalizeCountryName(name) {
   return name.trim();
@@ -69,6 +70,19 @@ function renderHiddenCountries() {
   });
 }
 
+function populateCountrySuggestions() {
+  if (!countrySuggestions || typeof COUNTRY_FLAGS !== 'object') return;
+  countrySuggestions.innerHTML = '';
+  
+  Object.keys(COUNTRY_FLAGS)
+    .sort((a, b) => a.localeCompare(b))
+    .forEach(country => {
+      const option = document.createElement('option');
+      option.value = country;
+      countrySuggestions.appendChild(option);
+    });
+}
+
 function addCountryFromInput() {
   const value = normalizeCountryName(countryInput.value);
   if (!value) return;
@@ -105,6 +119,7 @@ chrome.storage.local.get([TOGGLE_KEY, HIDDEN_COUNTRIES_KEY], (result) => {
   
   hiddenCountries = Array.isArray(result[HIDDEN_COUNTRIES_KEY]) ? result[HIDDEN_COUNTRIES_KEY] : [];
   renderHiddenCountries();
+  populateCountrySuggestions();
 });
 
 // Toggle click handler
