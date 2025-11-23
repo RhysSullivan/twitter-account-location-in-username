@@ -66,11 +66,27 @@ async function loadCache() {
     if (result[CACHE_KEY]) {
       const cached = result[CACHE_KEY];
       const now = Date.now();
-      
+
       // Filter out expired entries and null entries (allow retry)
+      // New cache shape stores an object for each username: { location: string|null|object, expiry, cachedAt }
+      // Normalize legacy string values into { location, locationAccurate: null }
       for (const [username, data] of Object.entries(cached)) {
-        if (data.expiry && data.expiry > now && data.location !== null) {
-          locationCache.set(username, data.location);
+        if (data.expiry && data.expiry > now) {
+          const stored = data.location;
+          if (stored === null) {
+            // previously cached null (failure) - skip rehydration to allow retry
+            continue;
+          }
+
+          if (typeof stored === 'string') {
+            // legacy format: location was a plain string
+            locationCache.set(username, { location: stored, locationAccurate: null });
+          } else if (typeof stored === 'object' && stored !== null) {
+            // new format: stored is an object { location, locationAccurate }
+            const loc = stored.location !== undefined ? stored.location : null;
+            const acc = stored.locationAccurate !== undefined ? stored.locationAccurate : null;
+            locationCache.set(username, { location: loc, locationAccurate: acc });
+          }
         }
       }
       console.log(`Loaded ${locationCache.size} cached locations (excluding null entries)`);
@@ -98,15 +114,31 @@ async function saveCache() {
     const cacheObj = {};
     const now = Date.now();
     const expiry = now + (CACHE_EXPIRY_DAYS * 24 * 60 * 60 * 1000);
-    
-    for (const [username, location] of locationCache.entries()) {
+
+    for (const [username, locationData] of locationCache.entries()) {
+      // Normalize locationData into a small object we persist. Keep nulls as null so
+      // loadCache can skip them (allowing retries after failures/timeouts).
+      let savedLocation = null;
+      if (locationData === null) {
+        savedLocation = null;
+      } else if (typeof locationData === 'string') {
+        // legacy case (shouldn't happen after migrating) - wrap into object
+        savedLocation = { location: locationData, locationAccurate: null };
+      } else {
+        // assume object { location, locationAccurate }
+        savedLocation = {
+          location: locationData.location !== undefined ? locationData.location : null,
+          locationAccurate: locationData.locationAccurate !== undefined ? locationData.locationAccurate : null
+        };
+      }
+
       cacheObj[username] = {
-        location: location,
+        location: savedLocation,
         expiry: expiry,
         cachedAt: now
       };
     }
-    
+
     await chrome.storage.local.set({ [CACHE_KEY]: cacheObj });
   } catch (error) {
     // Extension context invalidated errors are expected when extension is reloaded
@@ -126,7 +158,7 @@ async function saveCacheEntry(username, location) {
     console.log('Extension context invalidated, skipping cache entry save');
     return;
   }
-  
+  // location should be either null or an object { location: string|null, locationAccurate: boolean|null }
   locationCache.set(username, location);
   // Debounce saves - only save every 5 seconds
   if (!saveCache.timeout) {
@@ -226,16 +258,30 @@ function makeLocationRequest(screenName) {
           event.data.requestId === requestId) {
         window.removeEventListener('message', handler);
         const location = event.data.location;
+        const locationAccurate = ('locationAccurate' in event.data) ? event.data.locationAccurate : null;
         const isRateLimited = event.data.isRateLimited || false;
-        
+
         // Only cache if not rate limited (don't cache failures due to rate limiting)
+        // Preserve previous behavior: if API returned no location (null/undefined), save explicit null
+        // so loadCache will skip rehydration and allow retries later.
         if (!isRateLimited) {
-          saveCacheEntry(screenName, location || null);
+          if (location != null) {
+            // Persist the small object only when a real location string exists
+            saveCacheEntry(screenName, { location: location, locationAccurate: locationAccurate === undefined ? null : !!locationAccurate });
+          } else {
+            // Persist explicit null to allow retry behavior (matching prior logic)
+            saveCacheEntry(screenName, null);
+          }
         } else {
           console.log(`Not caching null for ${screenName} due to rate limit`);
         }
-        
-        resolve(location || null);
+
+        // Resolve with object when available, otherwise null (so callers can retry)
+        if (location != null) {
+          resolve({ location: location, locationAccurate: locationAccurate === undefined ? null : !!locationAccurate });
+        } else {
+          resolve(null);
+        }
       }
     };
     window.addEventListener('message', handler);
@@ -264,8 +310,8 @@ async function getUserLocation(screenName) {
     const cached = locationCache.get(screenName);
     // Don't return cached null - retry if it was null before (might have been rate limited)
     if (cached !== null) {
-      console.log(`Using cached location for ${screenName}: ${cached}`);
-      return cached;
+      console.log(`Using cached location for ${screenName}:`, cached);
+      return cached; // object: { location, locationAccurate }
     } else {
       console.log(`Found null in cache for ${screenName}, will retry API call`);
       // Remove from cache to allow retry
@@ -492,23 +538,26 @@ async function addFlagToUsername(usernameElement, screenName) {
   try {
     console.log(`Processing flag for ${screenName}...`);
 
-    // Get location
-    const location = await getUserLocation(screenName);
-    console.log(`Location for ${screenName}:`, location);
-    
+    // Get location (now returns an object: { location, locationAccurate })
+    const userLocationData = await getUserLocation(screenName);
+    console.log(`Location for ${screenName}:`, userLocationData);
+
     // Remove shimmer
     if (shimmerInserted && shimmerSpan.parentNode) {
       shimmerSpan.remove();
     }
-    
-    if (!location) {
+
+    if (!userLocationData || !userLocationData.location) {
       console.log(`No location found for ${screenName}, marking as failed`);
       usernameElement.dataset.flagAdded = 'failed';
       return;
     }
 
-  // Get flag emoji
-  const flag = getCountryFlag(location);
+    const location = userLocationData.location;
+    const locationAccurate = userLocationData.locationAccurate;
+
+    // Get flag emoji
+    const flag = getCountryFlag(location);
   if (!flag) {
     console.log(`No flag found for location: ${location}`);
     // Shimmer already removed above, but ensure it's gone
@@ -608,6 +657,24 @@ async function addFlagToUsername(usernameElement, screenName) {
   // Check if flag already exists (check in the entire container, not just parent)
   const existingFlag = usernameElement.querySelector('[data-twitter-flag]');
   if (existingFlag) {
+    // If the accuracy indicator is needed but missing, add it next to the existing flag
+    if (locationAccurate === false && !usernameElement.querySelector('[data-twitter-flag-accuracy]')) {
+      const warnSpan = document.createElement('span');
+      warnSpan.setAttribute('data-twitter-flag-accuracy', 'true');
+      warnSpan.textContent = ' ⚠️';
+      warnSpan.title = 'Location may be inaccurate (possible VPN/proxy) — data source: account metadata';
+      warnSpan.setAttribute('aria-label', 'Location may be inaccurate (possible VPN or proxy)');
+      warnSpan.style.marginLeft = '2px';
+      warnSpan.style.marginRight = '4px';
+      warnSpan.style.display = 'inline';
+      warnSpan.style.verticalAlign = 'middle';
+      try {
+        existingFlag.insertAdjacentElement('afterend', warnSpan);
+      } catch (e) {
+        existingFlag.parentNode.insertBefore(warnSpan, existingFlag.nextSibling);
+      }
+    }
+
     // Remove shimmer if flag already exists
     if (shimmerInserted && shimmerSpan.parentNode) {
       shimmerSpan.remove();
@@ -719,6 +786,27 @@ async function addFlagToUsername(usernameElement, screenName) {
   }
   
     if (inserted) {
+      // If the location accuracy is false, add a small warning emoji next to the flag
+      if (locationAccurate === false) {
+        // Avoid duplicate accuracy indicators
+        if (!usernameElement.querySelector('[data-twitter-flag-accuracy]')) {
+          const warnSpan = document.createElement('span');
+          warnSpan.setAttribute('data-twitter-flag-accuracy', 'true');
+          warnSpan.textContent = ' ⚠️';
+          warnSpan.title = 'Location may be inaccurate (possible VPN/proxy) — data source: account metadata';
+          warnSpan.setAttribute('aria-label', 'Location may be inaccurate (possible VPN or proxy)');
+          warnSpan.style.marginLeft = '2px';
+          warnSpan.style.marginRight = '4px';
+          warnSpan.style.display = 'inline';
+          warnSpan.style.verticalAlign = 'middle';
+          try {
+            flagSpan.insertAdjacentElement('afterend', warnSpan);
+          } catch (e) {
+            if (flagSpan.parentNode) flagSpan.parentNode.insertBefore(warnSpan, flagSpan.nextSibling);
+          }
+        }
+      }
+
       // Mark as processed
       usernameElement.dataset.flagAdded = 'true';
       console.log(`✓ Successfully added flag ${flag} for ${screenName} (${location})`);
