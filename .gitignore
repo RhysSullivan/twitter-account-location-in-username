@@ -16,3 +16,4 @@ Thumbs.db
 # Node modules (if you add build tools later)
 node_modules/
 
+__pycache__/
