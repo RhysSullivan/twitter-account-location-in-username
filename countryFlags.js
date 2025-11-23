@@ -13,6 +13,7 @@ const COUNTRY_FLAGS = {
   "Chile": "🇨🇱",
   "China": "🇨🇳",
   "Colombia": "🇨🇴",
+  "Costa Rica": "🇨🇷",
   "Czech Republic": "🇨🇿",
   "Denmark": "🇩🇰",
   "Egypt": "🇪🇬",
