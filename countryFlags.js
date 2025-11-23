@@ -63,6 +63,14 @@ const COUNTRY_FLAGS = {
   "Vietnam": "🇻🇳"
 };
 
+// TODO: Add more regions, since users can select to either show the country or region / contient
+const REGION_FLAGS = {
+  "Europe": "🇪🇺",
+  "West Asia": "🌏",
+  "East Asia & Pacific": "🌏",
+  "North America": "🌏"
+}
+
 function getCountryFlag(countryName) {
   if (!countryName) return null;
   
@@ -75,6 +83,17 @@ function getCountryFlag(countryName) {
   const normalized = countryName.trim();
   for (const [country, flag] of Object.entries(COUNTRY_FLAGS)) {
     if (country.toLowerCase() === normalized.toLowerCase()) {
+      return flag;
+    }
+  }
+
+  if (REGION_FLAGS[countryName]) {
+    return REGION_FLAGS[countryName];
+  }
+
+  // Try region match
+  for (const [region, flag] of Object.entries(REGION_FLAGS)) {
+    if (region.toLowerCase() === normalized.toLowerCase()) {
       return flag;
     }
   }
