@@ -179,7 +179,7 @@ function setHiddenCountries(countries) {
   hiddenCountries = new Set(
     countries
       .filter(country => typeof country === 'string' && country.trim().length > 0)
-      .map(country => country.toLowerCase())
+      .map(country => country.trim().toLowerCase())
   );
   
   refreshHiddenContainersVisibility();
