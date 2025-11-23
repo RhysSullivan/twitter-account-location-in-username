@@ -1,29 +1,48 @@
 // This script runs in the page context to access cookies and make API calls
 (function() {
-  // Store headers from Twitter's own API calls
+  // Store essential headers from Twitter's own API calls
   let twitterHeaders = null;
   let headersReady = false;
-  
-  // Function to capture headers from a request
+
+  // Only capture essential headers needed for the API call
+  const ESSENTIAL_HEADERS = [
+    'authorization',
+    'x-csrf-token',
+    'x-twitter-auth-type',
+    'x-twitter-active-user',
+    'x-twitter-client-language',
+  ];
+
+  // Function to capture only essential headers from a request
   function captureHeaders(headers) {
     if (!headers) return;
-    
+
     const headerObj = {};
+
     if (headers instanceof Headers) {
       headers.forEach((value, key) => {
-        headerObj[key] = value;
+        const lowerKey = key.toLowerCase();
+        if (ESSENTIAL_HEADERS.some(h => h.toLowerCase() === lowerKey)) {
+          headerObj[key] = value;
+        }
       });
     } else if (headers instanceof Object) {
-      // Copy all headers
+      // Only copy essential headers
       for (const [key, value] of Object.entries(headers)) {
-        headerObj[key] = value;
+        const lowerKey = key.toLowerCase();
+        if (ESSENTIAL_HEADERS.some(h => h.toLowerCase() === lowerKey)) {
+          headerObj[key] = value;
+        }
       }
     }
-    
-    // Replace headers completely (don't merge) to ensure we get auth tokens
-    twitterHeaders = headerObj;
-    headersReady = true;
-    console.log('Captured Twitter API headers:', Object.keys(headerObj));
+
+    // Only update if we captured any essential headers
+    if (Object.keys(headerObj).length > 0) {
+      twitterHeaders = { ...twitterHeaders, ...headerObj };
+      headersReady = true;
+      // Log header names only, not values (for security)
+      console.log('Captured Twitter API headers:', Object.keys(headerObj).join(', '));
+    }
   }
   
   // Intercept fetch to capture Twitter's headers
@@ -32,11 +51,10 @@
     const url = args[0];
     const options = args[1] || {};
     
-    // If it's a Twitter GraphQL API call, capture ALL headers
+    // If it's a Twitter GraphQL API call, capture essential headers only
     if (typeof url === 'string' && url.includes('x.com/i/api/graphql')) {
       if (options.headers) {
         captureHeaders(options.headers);
-        console.log('Captured Twitter headers:', Object.keys(twitterHeaders || {}));
       }
     }
     

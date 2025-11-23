@@ -12,8 +12,9 @@ const MAX_CONCURRENT_REQUESTS = 2; // Reduced concurrent requests
 let activeRequests = 0;
 let rateLimitResetTime = 0; // Unix timestamp when rate limit resets
 
-// Observer for dynamically loaded content
-let observer = null;
+// Observers for dynamically loaded content and navigation
+let contentObserver = null;
+let navigationObserver = null;
 
 // Extension enabled state
 let extensionEnabled = true;
@@ -22,6 +23,44 @@ const DEFAULT_ENABLED = true;
 
 // Track usernames currently being processed to avoid duplicate requests
 const processingUsernames = new Set();
+
+// Debug logging utilities
+const debug = {
+  log: (message, ...args) => {
+    if (CONFIG.DEBUG.ENABLED) {
+      console.log(`[TwitterFlag] ${message}`, ...args);
+    }
+  },
+  api: (message, ...args) => {
+    if (CONFIG.DEBUG.ENABLED && CONFIG.DEBUG.LOG_API_REQUESTS) {
+      console.log(`[TwitterFlag:API] ${message}`, ...args);
+    }
+  },
+  cache: (message, ...args) => {
+    if (CONFIG.DEBUG.ENABLED && CONFIG.DEBUG.LOG_CACHE_OPERATIONS) {
+      console.log(`[TwitterFlag:Cache] ${message}`, ...args);
+    }
+  },
+  username: (message, ...args) => {
+    if (CONFIG.DEBUG.ENABLED && CONFIG.DEBUG.LOG_USERNAME_EXTRACTION) {
+      console.log(`[TwitterFlag:Username] ${message}`, ...args);
+    }
+  },
+  flag: (message, ...args) => {
+    if (CONFIG.DEBUG.ENABLED && CONFIG.DEBUG.LOG_FLAG_INSERTION) {
+      console.log(`[TwitterFlag:Flag] ${message}`, ...args);
+    }
+  },
+  error: (message, ...args) => {
+    // Always log errors
+    console.error(`[TwitterFlag:Error] ${message}`, ...args);
+  },
+  warn: (message, ...args) => {
+    if (CONFIG.DEBUG.ENABLED) {
+      console.warn(`[TwitterFlag:Warning] ${message}`, ...args);
+    }
+  }
+};
 
 // Load enabled state
 async function loadEnabledState() {
@@ -821,17 +860,17 @@ async function processUsernames() {
 }
 
 // Initialize observer for dynamically loaded content
-function initObserver() {
-  if (observer) {
-    observer.disconnect();
+function initContentObserver() {
+  if (contentObserver) {
+    contentObserver.disconnect();
   }
 
-  observer = new MutationObserver((mutations) => {
+  contentObserver = new MutationObserver((mutations) => {
     // Don't process if extension is disabled
     if (!extensionEnabled) {
       return;
     }
-    
+
     let shouldProcess = false;
     for (const mutation of mutations) {
       if (mutation.addedNodes.length > 0) {
@@ -839,17 +878,52 @@ function initObserver() {
         break;
       }
     }
-    
+
     if (shouldProcess) {
       // Debounce processing
       setTimeout(processUsernames, 500);
     }
   });
 
-  observer.observe(document.body, {
+  contentObserver.observe(document.body, {
     childList: true,
     subtree: true
   });
+}
+
+// Initialize observer for navigation detection (SPA routing)
+function initNavigationObserver() {
+  if (navigationObserver) {
+    navigationObserver.disconnect();
+  }
+
+  let lastUrl = location.href;
+
+  navigationObserver = new MutationObserver(() => {
+    const url = location.href;
+    if (url !== lastUrl) {
+      lastUrl = url;
+      console.log('Page navigation detected, reprocessing usernames');
+      setTimeout(processUsernames, 2000);
+    }
+  });
+
+  navigationObserver.observe(document, {
+    subtree: true,
+    childList: true
+  });
+}
+
+// Cleanup observers
+function cleanupObservers() {
+  if (contentObserver) {
+    contentObserver.disconnect();
+    contentObserver = null;
+  }
+  if (navigationObserver) {
+    navigationObserver.disconnect();
+    navigationObserver = null;
+  }
 }
 
 // Main initialization
@@ -875,24 +949,19 @@ async function init() {
   setTimeout(() => {
     processUsernames();
   }, 2000);
-  
-  // Set up observer for new content
-  initObserver();
-  
-  // Re-process on navigation (Twitter uses SPA)
-  let lastUrl = location.href;
-  new MutationObserver(() => {
-    const url = location.href;
-    if (url !== lastUrl) {
-      lastUrl = url;
-      console.log('Page navigation detected, reprocessing usernames');
-      setTimeout(processUsernames, 2000);
-    }
-  }).observe(document, { subtree: true, childList: true });
-  
+
+  // Set up observers for new content and navigation
+  initContentObserver();
+  initNavigationObserver();
+
   // Save cache periodically
   setInterval(saveCache, 30000); // Save every 30 seconds
 }
+
+// Cleanup on page unload
+window.addEventListener('beforeunload', () => {
+  cleanupObservers();
+});
 
 // Wait for page to load
 if (document.readyState === 'loading') {
