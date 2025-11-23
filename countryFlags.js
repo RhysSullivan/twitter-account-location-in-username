@@ -68,7 +68,7 @@ const REGION_FLAGS = {
   "Europe": "🇪🇺",
   "West Asia": "🌏",
   "East Asia & Pacific": "🌏",
-  "North America": "🌏"
+  "North America": "🌎"
 }
 
 function getCountryFlag(countryName) {
