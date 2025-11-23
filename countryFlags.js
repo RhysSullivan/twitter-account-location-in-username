@@ -63,13 +63,16 @@ const COUNTRY_FLAGS = {
   "Vietnam": "🇻🇳"
 };
 
-// TODO: Add more regions, since users can select to either show the country or region / contient
 const REGION_FLAGS = {
-  "Europe": "🇪🇺",
-  "West Asia": "🌏",
+  "Australasia": "🌏",
   "East Asia & Pacific": "🌏",
-  "North America": "🌎"
-}
+  "Eastern Europe (Non-EU)": "🌍",
+  "Europe": "🇪🇺",
+  "North America": "🌎",
+  "South America": "🌎",
+  "Southeast Asia": "🌏",
+  "West Asia": "🌏",
+};
 
 function getCountryFlag(countryName) {
   if (!countryName) return null;
