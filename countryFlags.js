@@ -16,7 +16,6 @@ const COUNTRY_FLAGS = {
   "Czech Republic": "🇨🇿",
   "Denmark": "🇩🇰",
   "Egypt": "🇪🇬",
-  "Europe": "🇪🇺",
   "Finland": "🇫🇮",
   "France": "🇫🇷",
   "Germany": "🇩🇪",
@@ -78,6 +77,10 @@ function getCountryFlag(countryName) {
   if (COUNTRY_FLAGS[countryName]) {
     return COUNTRY_FLAGS[countryName];
   }
+
+  if (REGION_FLAGS[countryName]) {
+    return REGION_FLAGS[countryName];
+  }
   
   // Try case-insensitive match
   const normalized = countryName.trim();
@@ -87,9 +90,6 @@ function getCountryFlag(countryName) {
     }
   }
 
-  if (REGION_FLAGS[countryName]) {
-    return REGION_FLAGS[countryName];
-  }
 
   // Try region match
   for (const [region, flag] of Object.entries(REGION_FLAGS)) {
