@@ -1,6 +1,7 @@
 from datetime import datetime, timezone
 
 from fastapi import Depends, FastAPI, HTTPException, Query
+from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import select, text
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.exc import SQLAlchemyError
@@ -14,6 +15,14 @@ from .models import AccountLocation, Base
 from .schemas import HealthResponse, LocationCreate, LocationResponse
 
 app = FastAPI(title="Username Location Cache", version="0.1.0")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 @app.on_event("startup")
@@ -62,12 +71,12 @@ async def check_username(
     except Exception as exc:  # pragma: no cover - defensive for provider errors
         raise HTTPException(status_code=502, detail="location lookup failed") from exc
 
-    if new_location is not None:
-        canonical_location = normalize_country(new_location)
-        if canonical_location is None:
-            raise HTTPException(status_code=502, detail="location not in allowed country list")
-    else:
-        canonical_location = None
+    if new_location is None:
+        raise HTTPException(status_code=404, detail="location unavailable")
+
+    canonical_location = normalize_country(new_location)
+    if canonical_location is None:
+        raise HTTPException(status_code=502, detail="location not in allowed country list")
 
     stmt = insert(AccountLocation).values(
         username=normalized,
@@ -81,7 +90,6 @@ async def check_username(
 
     await session.execute(stmt)
     await session.commit()
-
     return LocationResponse(
         username=username,
         location=canonical_location,
@@ -103,11 +111,9 @@ async def add_location(
     normalized = username.lower()
     now = datetime.now(timezone.utc)
 
-    canonical_location = None
-    if payload.location is not None:
-        canonical_location = normalize_country(payload.location)
-        if canonical_location is None:
-            raise HTTPException(status_code=422, detail="location must be one of the allowed country names")
+    canonical_location = normalize_country(payload.location)
+    if canonical_location is None:
+        raise HTTPException(status_code=422, detail="location must be one of the allowed country names")
 
     stmt = insert(AccountLocation).values(
         username=normalized,
@@ -118,7 +124,7 @@ async def add_location(
         index_elements=[AccountLocation.username],
         set_={"location": stmt.excluded.location, "fetched_at": stmt.excluded.fetched_at},
     )
-
+    print(f"adding {canonical_location} for {normalized}")
     await session.execute(stmt)
     await session.commit()
 

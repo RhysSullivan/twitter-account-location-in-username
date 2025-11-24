@@ -21,4 +21,4 @@ class LocationResponse(BaseModel):
 
 class LocationCreate(BaseModel):
     username: str
-    location: Optional[str] = None
+    location: str

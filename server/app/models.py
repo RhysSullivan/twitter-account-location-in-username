@@ -16,5 +16,5 @@ class AccountLocation(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     username = Column(String(50), nullable=False, index=True)
-    location = Column(String(255), nullable=True)
+    location = Column(String(255), nullable=False)
     fetched_at = Column(DateTime(timezone=True), nullable=False, default=utcnow)

@@ -2,6 +2,10 @@
 let locationCache = new Map();
 const CACHE_KEY = 'twitter_location_cache';
 const CACHE_EXPIRY_DAYS = 30; // Cache for 30 days
+const SERVER_BASE_URL = 'http://localhost:8000';
+const SERVER_TIMEOUT_MS = 5000;
+const SERVER_LOOKUP_TTL_MS = 0; // Always re-check DB per user (no TTL)
+const SERVER_UPSERT_TTL_MS = 30 * 1000; // Throttle writes to DB per user
 
 // Hidden countries preferences
 const HIDDEN_COUNTRIES_KEY = 'hidden_countries';
@@ -11,10 +15,12 @@ let hiddenCountries = new Set();
 const requestQueue = [];
 let isProcessingQueue = false;
 let lastRequestTime = 0;
-const MIN_REQUEST_INTERVAL = 2000; // 2 seconds between requests (increased to avoid rate limits)
-const MAX_CONCURRENT_REQUESTS = 2; // Reduced concurrent requests
+const MIN_REQUEST_INTERVAL = 500; // 0.5 seconds between requests
+const MAX_CONCURRENT_REQUESTS = 4; // Allow more concurrent requests
 let activeRequests = 0;
 let rateLimitResetTime = 0; // Unix timestamp when rate limit resets
+const serverLookupCache = new Map(); // username -> { checkedAt, location, promise }
+const serverUpsertTracker = new Map(); // username -> { timestamp, promise }
 
 // Observer for dynamically loaded content
 let observer = null;
@@ -170,6 +176,133 @@ async function saveCacheEntry(username, location) {
   }
 }
 
+// Helper: request server via background (avoids mixed-content/CORS in content script)
+function serverFetch(path, { method = 'GET', body = null } = {}) {
+  return new Promise((resolve) => {
+    if (!chrome.runtime?.id) {
+      resolve({ ok: false, status: 0, data: null, error: 'no-runtime' });
+      return;
+    }
+    chrome.runtime.sendMessage(
+      { type: 'SERVER_FETCH', path, method, body },
+      (response) => {
+        if (chrome.runtime.lastError) {
+          resolve({ ok: false, status: 0, data: null, error: chrome.runtime.lastError.message });
+          return;
+        }
+        resolve(response || { ok: false, status: 0, data: null, error: 'no-response' });
+      }
+    );
+  });
+}
+
+// Best-effort server lookup with simple TTL + in-flight dedupe
+async function getServerLocationCached(screenName, { force = false } = {}) {
+  const now = Date.now();
+  const entry = serverLookupCache.get(screenName);
+
+  if (entry) {
+    if (entry.promise) {
+      return entry.promise;
+    }
+    if (!force && now - entry.checkedAt < SERVER_LOOKUP_TTL_MS) {
+      return entry.location;
+    }
+  }
+
+  const promise = (async () => {
+    const location = await fetchServerLocation(screenName);
+    const normalized = location || null;
+    serverLookupCache.set(screenName, {
+      checkedAt: Date.now(),
+      location: normalized,
+      promise: null
+    });
+    if (normalized) {
+      await saveCacheEntry(screenName, normalized);
+    }
+    return normalized;
+  })();
+
+  serverLookupCache.set(screenName, {
+    checkedAt: now,
+    location: entry?.location ?? null,
+    promise
+  });
+
+  return promise;
+}
+
+// Query server cache when rate limited
+async function fetchServerLocation(screenName) {
+  if (!SERVER_BASE_URL) return null;
+  try {
+    console.log(`Fetching server cache for ${screenName} at ${SERVER_BASE_URL}/check`);
+    const resp = await serverFetch(`/check?a=${encodeURIComponent(screenName)}`, { method: 'GET' });
+    if (!resp?.ok) {
+      console.warn(`Server cache miss/err for ${screenName}: status ${resp?.status}`, resp?.error);
+      return null;
+    }
+    console.log(`Server cache hit for ${screenName}:`, resp.data);
+    return resp.data?.location || null;
+  } catch (err) {
+    console.warn(`Server lookup failed for ${screenName}:`, err);
+    return null;
+  }
+}
+
+// Upsert location on server after a lookup (best effort, only when we have a known country)
+async function upsertServerLocation(screenName, location) {
+  if (!SERVER_BASE_URL || !location) return;
+
+  // Only send if we recognize the country
+  if (!getCountryFlag(location)) {
+    console.log(`Skipping server upsert for ${screenName}: unknown country ${location}`);
+    return;
+  }
+
+  try {
+    const resp = await serverFetch('/add', {
+      method: 'POST',
+      body: { username: screenName, location }
+    });
+    if (!resp?.ok) {
+      console.warn(`Server upsert failed for ${screenName}: status ${resp?.status}`, resp?.error);
+    } else {
+      console.log(`Server cache updated for ${screenName}: ${location}`);
+    }
+  } catch (err) {
+    console.warn(`Failed to upsert location for ${screenName} to server:`, err);
+  }
+}
+
+// Throttle and dedupe server writes to make sure scrolls push to DB reliably
+async function ensureServerUpsert(screenName, location) {
+  if (!location) return;
+
+  const now = Date.now();
+  const entry = serverUpsertTracker.get(screenName);
+  if (entry) {
+    if (entry.promise) {
+      return entry.promise;
+    }
+    if (now - entry.timestamp < SERVER_UPSERT_TTL_MS) {
+      return;
+    }
+  }
+
+  const promise = upsertServerLocation(screenName, location)
+    .catch((err) => {
+      console.warn(`Best-effort upsert failed for ${screenName}:`, err);
+    })
+    .finally(() => {
+      serverUpsertTracker.set(screenName, { timestamp: Date.now(), promise: null });
+    });
+
+  serverUpsertTracker.set(screenName, { timestamp: now, promise });
+  return promise;
+}
+
 // Hidden countries helpers
 function setHiddenCountries(countries) {
   if (!Array.isArray(countries)) {
@@ -303,8 +436,8 @@ async function processRequestQueue() {
     
     // Make the request
     makeLocationRequest(screenName)
-      .then(location => {
-        resolve(location);
+      .then(result => {
+        resolve(result);
       })
       .catch(error => {
         reject(error);
@@ -323,6 +456,8 @@ async function processRequestQueue() {
 function makeLocationRequest(screenName) {
   return new Promise((resolve, reject) => {
     const requestId = Date.now() + Math.random();
+    let timedOut = false;
+    console.log(`Requesting X API for ${screenName} (requestId=${requestId})`);
     
     // Listen for response via postMessage
     const handler = (event) => {
@@ -344,7 +479,7 @@ function makeLocationRequest(screenName) {
           console.log(`Not caching null for ${screenName} due to rate limit`);
         }
         
-        resolve(location || null);
+        resolve({ location: location || null, isRateLimited, timedOut });
       }
     };
     window.addEventListener('message', handler);
@@ -361,7 +496,7 @@ function makeLocationRequest(screenName) {
       window.removeEventListener('message', handler);
       // Don't cache timeout failures - allow retry
       console.log(`Request timeout for ${screenName}, not caching`);
-      resolve(null);
+      resolve({ location: null, isRateLimited: false, timedOut: true });
     }, 10000);
   });
 }
@@ -374,6 +509,7 @@ async function getUserLocation(screenName) {
     // Don't return cached null - retry if it was null before (might have been rate limited)
     if (cached !== null) {
       console.log(`Using cached location for ${screenName}: ${cached}`);
+      await ensureServerUpsert(screenName, cached);
       return cached;
     } else {
       console.log(`Found null in cache for ${screenName}, will retry API call`);
@@ -381,36 +517,62 @@ async function getUserLocation(screenName) {
       locationCache.delete(screenName);
     }
   }
+
+  // Check server cache before hitting X (more reliable when scrolling quickly)
+  const serverFirst = await getServerLocationCached(screenName);
+  if (serverFirst !== null) {
+    console.log(`Using server location for ${screenName}: ${serverFirst}`);
+    await ensureServerUpsert(screenName, serverFirst);
+    return serverFirst;
+  }
   
   console.log(`Queueing API request for ${screenName}`);
   // Queue the request
-  return new Promise((resolve, reject) => {
+  const { location: apiLocation, isRateLimited, timedOut } = await new Promise((resolve, reject) => {
     requestQueue.push({ screenName, resolve, reject });
     processRequestQueue();
   });
+
+  // On rate limit or timeout, ask server for cached value
+  if (isRateLimited || timedOut) {
+    const serverLocation = await getServerLocationCached(screenName, { force: true });
+    if (serverLocation !== null) {
+      await saveCacheEntry(screenName, serverLocation);
+      return serverLocation;
+    }
+    return null;
+  }
+
+  if (apiLocation) {
+    console.log(`X API returned location for ${screenName}: ${apiLocation} -> sending to server`);
+    await ensureServerUpsert(screenName, apiLocation);
+  }
+
+  return apiLocation;
 }
 
 // Function to extract username from various Twitter UI elements
 function extractUsername(element) {
+  const excludedRoutes = ['home', 'explore', 'notifications', 'messages', 'i', 'compose', 'search', 'settings', 'bookmarks', 'lists', 'communities', 'hashtag'];
+
+  function validUsername(name) {
+    if (!name) return null;
+    const clean = name.replace(/^@/, '');
+    if (clean.length === 0 || clean.length > 20) return null;
+    if (excludedRoutes.some(route => clean === route || clean.startsWith(route))) return null;
+    if (clean.includes('/') || clean.match(/^\d+$/)) return null;
+    return clean;
+  }
+
   // Try data-testid="UserName" or "User-Name" first (most reliable)
   const usernameElement = element.querySelector('[data-testid="UserName"], [data-testid="User-Name"]');
   if (usernameElement) {
     const links = usernameElement.querySelectorAll('a[href^="/"]');
     for (const link of links) {
-      const href = link.getAttribute('href');
+      const href = link.getAttribute('href') || '';
       const match = href.match(/^\/([^\/\?]+)/);
-      if (match && match[1]) {
-        const username = match[1];
-        // Filter out common routes
-        const excludedRoutes = ['home', 'explore', 'notifications', 'messages', 'i', 'compose', 'search', 'settings', 'bookmarks', 'lists', 'communities'];
-        if (!excludedRoutes.includes(username) && 
-            !username.startsWith('hashtag') &&
-            !username.startsWith('search') &&
-            username.length > 0 &&
-            username.length < 20) { // Usernames are typically short
-          return username;
-        }
-      }
+      const candidate = validUsername(match && match[1]);
+      if (candidate) return candidate;
     }
   }
   
@@ -419,75 +581,41 @@ function extractUsername(element) {
   const seenUsernames = new Set();
   
   for (const link of allLinks) {
-    const href = link.getAttribute('href');
-    if (!href) continue;
-    
+    const href = link.getAttribute('href') || '';
     const match = href.match(/^\/([^\/\?]+)/);
-    if (!match || !match[1]) continue;
+    const potentialUsername = validUsername(match && match[1]);
     
-    const potentialUsername = match[1];
-    
-    // Skip if we've already checked this username
-    if (seenUsernames.has(potentialUsername)) continue;
+    if (!potentialUsername || seenUsernames.has(potentialUsername)) continue;
     seenUsernames.add(potentialUsername);
     
-    // Filter out routes and invalid usernames
-    const excludedRoutes = ['home', 'explore', 'notifications', 'messages', 'i', 'compose', 'search', 'settings', 'bookmarks', 'lists', 'communities', 'hashtag'];
-    if (excludedRoutes.some(route => potentialUsername === route || potentialUsername.startsWith(route))) {
-      continue;
-    }
-    
-    // Skip status/tweet links
-    if (potentialUsername.includes('status') || potentialUsername.match(/^\d+$/)) {
-      continue;
-    }
-    
-    // Check link text/content for username indicators
-    const text = link.textContent?.trim() || '';
+    const text = (link.textContent || '').trim();
     const linkText = text.toLowerCase();
     const usernameLower = potentialUsername.toLowerCase();
+    const ariaLabel = (link.getAttribute('aria-label') || '').trim();
     
-    // If link text starts with @, it's definitely a username
-    if (text.startsWith('@')) {
+    if (text.startsWith('@') || ariaLabel.startsWith('@')) {
       return potentialUsername;
     }
     
-    // If link text matches the username (without @), it's likely a username
     if (linkText === usernameLower || linkText === `@${usernameLower}`) {
       return potentialUsername;
     }
     
-    // Check if link is in a UserName container or has username-like structure
     const parent = link.closest('[data-testid="UserName"], [data-testid="User-Name"]');
-    if (parent) {
-      // If it's in a UserName container and looks like a username, return it
-      if (potentialUsername.length > 0 && potentialUsername.length < 20 && !potentialUsername.includes('/')) {
-        return potentialUsername;
-      }
-    }
-    
-    // Also check if link text is @username format
-    if (text && text.trim().startsWith('@')) {
-      const atUsername = text.trim().substring(1);
-      if (atUsername === potentialUsername) {
-        return potentialUsername;
-      }
+    if (parent && potentialUsername.length > 0) {
+      return potentialUsername;
     }
   }
   
   // Last resort: look for @username pattern in text content and verify with link
   const textContent = element.textContent || '';
-  const atMentionMatches = textContent.matchAll(/@([a-zA-Z0-9_]+)/g);
+  const atMentionMatches = textContent.matchAll(/@([a-zA-Z0-9_]{1,20})/g);
   for (const match of atMentionMatches) {
-    const username = match[1];
-    // Verify it's actually a link in a User-Name container
+    const username = validUsername(match[1]);
+    if (!username) continue;
     const link = element.querySelector(`a[href="/${username}"], a[href^="/${username}?"]`);
     if (link) {
-      // Make sure it's in a username context, not just mentioned in tweet text
-      const isInUserNameContainer = link.closest('[data-testid="UserName"], [data-testid="User-Name"]');
-      if (isInUserNameContainer) {
-        return username;
-      }
+      return username;
     }
   }
   
@@ -604,7 +732,7 @@ async function addFlagToUsername(usernameElement, screenName) {
     // Get location
     const location = await getUserLocation(screenName);
     console.log(`Location for ${screenName}:`, location);
-    
+
     // Remove shimmer
     if (shimmerInserted && shimmerSpan.parentNode) {
       shimmerSpan.remove();
@@ -899,7 +1027,14 @@ async function processUsernames() {
   }
   
   // Find all tweet/article containers and user cells
-  const containers = document.querySelectorAll('article[data-testid="tweet"], [data-testid="UserCell"], [data-testid="User-Names"], [data-testid="User-Name"]');
+  const containers = document.querySelectorAll([
+    'article[data-testid="tweet"]',
+    'article[role="article"]',
+    '[data-testid="cellInnerDiv"]',
+    '[data-testid="UserCell"]',
+    '[data-testid="User-Names"]',
+    '[data-testid="User-Name"]',
+  ].join(', '));
   
   console.log(`Processing ${containers.length} containers for usernames`);
   
