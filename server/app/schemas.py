@@ -13,7 +13,7 @@ class LocationResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     username: str
-    location: Optional[str]
+    location: str
     cached: bool
     last_checked: datetime
     expires_at: datetime
