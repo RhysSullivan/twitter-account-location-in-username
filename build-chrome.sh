@@ -25,5 +25,19 @@ rsync -av \
 cp "$ROOT_DIR/manifest.json" "$DIST_DIR/manifest.json"
 
 rm -f "$ARTIFACT"
-(cd "$DIST_DIR" && zip -r "$ARTIFACT" . >/dev/null)
+if command -v zip >/dev/null 2>&1; then
+  (cd "$DIST_DIR" && zip -r "$ARTIFACT" . >/dev/null)
+else
+  echo "zip not found; using python to create archive..."
+  (cd "$DIST_DIR" && python3 - <<'PY'
+import os, zipfile
+artifact = os.path.join(os.getcwd(), "../chrome.zip")
+with zipfile.ZipFile(artifact, "w", zipfile.ZIP_DEFLATED) as zf:
+    for root, _, files in os.walk("."):
+        for f in files:
+            path = os.path.join(root, f)
+            zf.write(path, arcname=os.path.relpath(path, "."))
+PY
+  )
+fi
 echo "Chrome package created at $ARTIFACT"
