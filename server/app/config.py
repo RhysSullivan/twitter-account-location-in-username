@@ -19,7 +19,7 @@ class Settings(BaseModel):
     def load(cls) -> "Settings":
         return cls(
             database_url=os.getenv("DATABASE_URL", DEFAULT_DB_URL),
-            cache_ttl_days=int(os.getenv("CACHE_TTL_DAYS", Settings.cache_ttl_days)),
+            cache_ttl_days=int(os.getenv("CACHE_TTL_DAYS", "7")),
         )
 
 
