@@ -1,3 +1,5 @@
+import asyncio
+import logging
 from datetime import datetime, timezone
 
 from fastapi import Depends, FastAPI, HTTPException, Query
@@ -6,11 +8,10 @@ from sqlalchemy import select, text
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
-import logging
 
 from .config import settings
 from .countries import normalize_country
-from .db import engine, get_session
+from .db import SessionLocal, engine, get_session
 from .location_provider import fetch_location_for_username
 from .models import AccountLocation, Base
 from .schemas import HealthResponse, LocationCreate, LocationResponse
@@ -31,15 +32,48 @@ async def index():
     return {
         "service": "username-location-cache",
         "endpoints": {
-          "healthcheck": {"method": "GET", "path": "/healthcheck"},
-          "check": {"method": "GET", "path": "/check?a=<username>"},
-          "add": {"method": "POST", "path": "/add", "body": {"username": "<username>", "location": "<country>"}, "status": 201},
+            "healthcheck": {"method": "GET", "path": "/healthcheck"},
+            "check": {"method": "GET", "path": "/check?a=<username>"},
+            "add": {"method": "POST", "path": "/add", "body": {"username": "<username>", "location": "<country>"}, "status": 201},
         },
         "examples": {
-          "healthcheck": "curl https://twitter.superintendent.me/healthcheck",
-          "check": "curl 'https://twitter.superintendent.me/check?a=jack'"
+            "healthcheck": "curl https://twitter.superintendent.me/healthcheck",
+            "check": "curl 'https://twitter.superintendent.me/check?a=jack'",
         },
     }
+
+
+def _upsert_location_stmt(normalized_username: str, location: str, fetched_at: datetime):
+    stmt = insert(AccountLocation).values(
+        username=normalized_username,
+        location=location,
+        fetched_at=fetched_at,
+    )
+    return stmt.on_conflict_do_update(
+        index_elements=[AccountLocation.username],
+        set_={"location": stmt.excluded.location, "fetched_at": stmt.excluded.fetched_at},
+    )
+
+
+async def _refresh_location(username: str, normalized: str):
+    now = datetime.now(timezone.utc)
+    try:
+        new_location = await fetch_location_for_username(username)
+    except Exception:  # pragma: no cover - defensive for provider errors
+        logger.exception("background refresh failed for %s", normalized)
+        return
+
+    if new_location is None:
+        return
+
+    canonical_location = normalize_country(new_location)
+    if canonical_location is None:
+        return
+
+    async with SessionLocal() as session:
+        stmt = _upsert_location_stmt(normalized, canonical_location, now)
+        await session.execute(stmt)
+        await session.commit()
 
 
 @app.on_event("startup")
@@ -70,17 +104,34 @@ async def check_username(
     normalized = username.lower()
     now = datetime.now(timezone.utc)
 
-    result = await session.execute(select(AccountLocation).where(AccountLocation.username == normalized))
-    record = result.scalar_one_or_none()
+    result = await session.execute(
+        select(AccountLocation.location, AccountLocation.fetched_at).where(AccountLocation.username == normalized)
+    )
+    record = result.first()
 
-    fresh = record is not None and (now - record.fetched_at) < settings.cache_ttl
+    if record is not None:
+        location, fetched_at = record
+        fresh = (now - fetched_at) < settings.cache_ttl
+    else:
+        location, fetched_at, fresh = None, None, False
+
     if fresh:
         return LocationResponse(
             username=username,
-            location=record.location,
+            location=location,
             cached=True,
-            last_checked=record.fetched_at,
-            expires_at=record.fetched_at + settings.cache_ttl,
+            last_checked=fetched_at,
+            expires_at=fetched_at + settings.cache_ttl,
+        )
+
+    if location is not None:
+        asyncio.create_task(_refresh_location(username, normalized))
+        return LocationResponse(
+            username=username,
+            location=location,
+            cached=False,
+            last_checked=fetched_at,
+            expires_at=fetched_at + settings.cache_ttl,
         )
 
     try:
@@ -95,16 +146,7 @@ async def check_username(
     if canonical_location is None:
         raise HTTPException(status_code=502, detail="location not in allowed country list")
 
-    stmt = insert(AccountLocation).values(
-        username=normalized,
-        location=canonical_location,
-        fetched_at=now,
-    )
-    stmt = stmt.on_conflict_do_update(
-        index_elements=[AccountLocation.username],
-        set_={"location": stmt.excluded.location, "fetched_at": stmt.excluded.fetched_at},
-    )
-
+    stmt = _upsert_location_stmt(normalized, canonical_location, now)
     await session.execute(stmt)
     await session.commit()
     return LocationResponse(
@@ -132,15 +174,7 @@ async def add_location(
     if canonical_location is None:
         raise HTTPException(status_code=422, detail="location must be one of the allowed country names")
 
-    stmt = insert(AccountLocation).values(
-        username=normalized,
-        location=canonical_location,
-        fetched_at=now,
-    )
-    stmt = stmt.on_conflict_do_update(
-        index_elements=[AccountLocation.username],
-        set_={"location": stmt.excluded.location, "fetched_at": stmt.excluded.fetched_at},
-    )
+    stmt = _upsert_location_stmt(normalized, canonical_location, now)
     logger.info(f"adding for {normalized},{canonical_location}")
     await session.execute(stmt)
     await session.commit()
