@@ -6,6 +6,7 @@ from sqlalchemy import select, text
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
+import logging
 
 from .config import settings
 from .countries import normalize_country
@@ -14,14 +15,14 @@ from .location_provider import fetch_location_for_username
 from .models import AccountLocation, Base
 from .schemas import HealthResponse, LocationCreate, LocationResponse
 
+logger = logging.getLogger(__name__)
+
+
 app = FastAPI(title="Username Location Cache", version="0.1.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=["https://twitter.superintendent.me"],
 )
 
 
@@ -124,7 +125,7 @@ async def add_location(
         index_elements=[AccountLocation.username],
         set_={"location": stmt.excluded.location, "fetched_at": stmt.excluded.fetched_at},
     )
-    print(f"adding {canonical_location} for {normalized}")
+    logger.info(f"adding for {normalized},{canonical_location}")
     await session.execute(stmt)
     await session.commit()
 
