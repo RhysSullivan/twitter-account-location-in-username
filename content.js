@@ -20,8 +20,238 @@ let extensionEnabled = true;
 const TOGGLE_KEY = 'extension_enabled';
 const DEFAULT_ENABLED = true;
 
+// Display mode state
+const MODE_KEY = 'display_mode';
+const MODE_AUTO = 'auto';
+const MODE_MANUAL = 'manual';
+let displayMode = MODE_AUTO;
+
 // Track usernames currently being processed to avoid duplicate requests
 const processingUsernames = new Set();
+
+const VPN_ICON = '\uD83D\uDEE1';
+const INFO_ICON = '\u2139\uFE0F';
+const ACCURATE_ICON = '\u2705';
+const UNKNOWN_ICON = '\u2022';
+const ACCURACY_DISCLAIMER = 'The country or region that an account is based can be impacted by recent travel or temporary relocation. This data may not be accurate and can change periodically.';
+
+function deriveCountryFromSource(source) {
+  if (!source || typeof source !== 'string') {
+    return null;
+  }
+
+  const normalized = source.trim();
+  if (normalized && getCountryFlag(normalized)) {
+    return normalized;
+  }
+
+  const sanitized = normalized
+    .replace(/App Store/gi, '')
+    .replace(/Google Play/gi, '')
+    .replace(/Android App/gi, '')
+    .replace(/Android/gi, '')
+    .replace(/iOS App/gi, '')
+    .replace(/iOS/gi, '')
+    .replace(/App/gi, '')
+    .replace(/Google/gi, '')
+    .replace(/Web/gi, '')
+    .replace(/[,()]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  if (sanitized && getCountryFlag(sanitized)) {
+    return sanitized;
+  }
+
+  const lowerSource = sanitized.toLowerCase();
+  for (const country of Object.keys(COUNTRY_FLAGS)) {
+    if (lowerSource.includes(country.toLowerCase())) {
+      return country;
+    }
+  }
+
+  return null;
+}
+
+function normalizeLocationData(data) {
+  if (data == null) {
+    return null;
+  }
+
+  if (data.locationData) {
+    return normalizeLocationData(data.locationData);
+  }
+
+  if (typeof data === 'string') {
+    return {
+      location: data,
+      source: null,
+      sourceCountry: null,
+      locationAccurate: null,
+      learnMoreUrl: null
+    };
+  }
+
+  const normalized = {
+    location: typeof data.location === 'string'
+      ? data.location.trim()
+      : (typeof data.account_based_in === 'string' ? data.account_based_in.trim() : data.account_based_in ?? null),
+    source: typeof data.source === 'string'
+      ? data.source.trim()
+      : (typeof data.source_country === 'string' ? data.source_country.trim() : data.source ?? null),
+    sourceCountry: data.sourceCountry ?? data.source_country ?? null,
+    locationAccurate: data.locationAccurate !== undefined ? data.locationAccurate :
+      (data.location_accurate !== undefined ? data.location_accurate : null),
+    learnMoreUrl: data.learnMoreUrl ?? data.learn_more_url ?? null
+  };
+
+  if (!normalized.sourceCountry) {
+    normalized.sourceCountry = deriveCountryFromSource(normalized.source);
+  }
+
+  return normalized;
+}
+
+function buildLocationDisplayInfo(data) {
+  if (!data) {
+    return null;
+  }
+
+  const trimmedLocation = typeof data.location === 'string' ? data.location.trim() : data.location;
+  const trimmedSource = typeof data.source === 'string' ? data.source.trim() : data.source;
+  const sourceCountry = data.sourceCountry || deriveCountryFromSource(trimmedSource);
+  const locationFlag = trimmedLocation ? getCountryFlag(trimmedLocation) : null;
+  const sourceFlag = sourceCountry ? getCountryFlag(sourceCountry) : null;
+  const isVpn = Boolean(
+    data.location && sourceCountry && data.location !== sourceCountry
+  );
+
+  return {
+    ...data,
+    sourceCountry,
+    locationFlag,
+    sourceFlag,
+    isVpn
+  };
+}
+
+function createBadgeSpan({ text, title, dataset = {} }) {
+  const span = document.createElement('span');
+  span.textContent = text;
+  span.style.display = 'inline-flex';
+  span.style.alignItems = 'center';
+  span.style.verticalAlign = 'middle';
+  span.style.marginLeft = '2px';
+  span.style.marginRight = '2px';
+  span.style.fontSize = '0.95em';
+  span.style.lineHeight = '1';
+  if (title) {
+    span.title = title;
+  }
+  Object.entries(dataset).forEach(([key, value]) => {
+    span.dataset[key] = value;
+  });
+  if (dataset.twitterFlag === 'true') {
+    span.setAttribute('data-twitter-flag', 'true');
+  }
+  return span;
+}
+
+function createFlagElement(symbol, title) {
+  if (!symbol) {
+    return null;
+  }
+  return createBadgeSpan({
+    text: symbol,
+    title,
+    dataset: { twitterFlag: 'true', flagType: 'country' }
+  });
+}
+
+function createBracketWrapper() {
+  const wrapper = document.createElement('span');
+  wrapper.setAttribute('data-twitter-flag-wrapper', 'true');
+  wrapper.style.display = 'inline-flex';
+  wrapper.style.alignItems = 'center';
+  wrapper.style.gap = '4px';
+  wrapper.style.marginLeft = '4px';
+  wrapper.style.marginRight = '4px';
+  wrapper.style.fontSize = '0.95em';
+  wrapper.style.verticalAlign = 'middle';
+  return wrapper;
+}
+
+function createTextSegment(text, title) {
+  const span = document.createElement('span');
+  span.textContent = text;
+  if (title) {
+    span.title = title;
+  }
+  span.style.display = 'inline-flex';
+  span.style.alignItems = 'center';
+  span.style.verticalAlign = 'middle';
+  span.style.marginLeft = '2px';
+  span.style.marginRight = '2px';
+  return span;
+}
+
+function createIndicatorSegment(displayInfo) {
+  if (displayInfo.isVpn) {
+    return createBadgeSpan({
+      text: VPN_ICON,
+      title: 'Account-based location differs from source (possible VPN/proxy)',
+      dataset: { twitterFlag: 'true', flagType: 'vpn' }
+    });
+  }
+
+  if (displayInfo.locationAccurate === false) {
+    return createBadgeSpan({
+      text: INFO_ICON,
+      title: displayInfo.learnMoreUrl ? `${ACCURACY_DISCLAIMER} (click to learn more)` : ACCURACY_DISCLAIMER,
+      dataset: { twitterFlag: 'true', flagType: 'info' }
+    });
+  }
+
+  return createBadgeSpan({
+    text: ACCURATE_ICON,
+    title: 'Location is marked accurate',
+    dataset: { twitterFlag: 'true', flagType: 'accuracy' }
+  });
+}
+
+function buildBracketedDisplay(displayInfo) {
+  const wrapper = createBracketWrapper();
+
+  const accountSegment = createFlagElement(displayInfo.locationFlag, displayInfo.location || 'Account-based location')
+    || createBadgeSpan({
+      text: UNKNOWN_ICON,
+      title: 'Account-based location unavailable',
+      dataset: { twitterFlag: 'true', flagType: 'unknown' }
+    });
+
+  const indicatorSegment = createIndicatorSegment(displayInfo);
+
+  const sourceSegment = createFlagElement(displayInfo.sourceFlag, displayInfo.sourceCountry || displayInfo.source || 'Source region')
+    || createBadgeSpan({
+      text: UNKNOWN_ICON,
+      title: 'Source region unavailable',
+      dataset: { twitterFlag: 'true', flagType: 'unknown' }
+    });
+
+  const segments = [
+    createTextSegment('[', 'Account / status / source'),
+    accountSegment,
+    createTextSegment('|'),
+    indicatorSegment,
+    createTextSegment('|'),
+    sourceSegment,
+    createTextSegment(']')
+  ];
+
+  segments.forEach(node => wrapper.appendChild(node));
+
+  return wrapper;
+}
 
 // Load enabled state
 async function loadEnabledState() {
@@ -32,6 +262,18 @@ async function loadEnabledState() {
   } catch (error) {
     console.error('Error loading enabled state:', error);
     extensionEnabled = DEFAULT_ENABLED;
+  }
+}
+
+// Load display mode
+async function loadDisplayMode() {
+  try {
+    const result = await chrome.storage.local.get([MODE_KEY]);
+    displayMode = result[MODE_KEY] || MODE_AUTO;
+    console.log('Display mode:', displayMode);
+  } catch (error) {
+    console.error('Error loading display mode:', error);
+    displayMode = MODE_AUTO;
   }
 }
 
@@ -51,6 +293,12 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
       removeAllFlags();
     }
   }
+  
+  if (request.type === 'modeChange') {
+    displayMode = request.mode;
+    console.log('Mode changed to:', displayMode);
+    handleModeChange(request.mode);
+  }
 });
 
 // Load cache from persistent storage
@@ -66,14 +314,36 @@ async function loadCache() {
     if (result[CACHE_KEY]) {
       const cached = result[CACHE_KEY];
       const now = Date.now();
+      let restored = 0;
+      let expired = 0;
       
       // Filter out expired entries and null entries (allow retry)
       for (const [username, data] of Object.entries(cached)) {
-        if (data.expiry && data.expiry > now && data.location !== null) {
-          locationCache.set(username, data.location);
+        if (!data || !data.expiry) {
+          continue;
+        }
+        
+        // Check if entry is expired
+        if (data.expiry <= now) {
+          expired++;
+          continue;
+        }
+
+        const storedValue = data.data ?? data.location ?? null;
+        if (storedValue === null) {
+          continue;
+        }
+
+        const normalized = normalizeLocationData(storedValue);
+        if (normalized) {
+          // Store with expiry timestamp for runtime checking
+          locationCache.set(username, { ...normalized, expiry: data.expiry });
+          restored++;
         }
       }
-      console.log(`Loaded ${locationCache.size} cached locations (excluding null entries)`);
+      if (restored > 0) {
+        console.log(`Loaded ${restored} cached locations (excluding ${expired} expired entries)`);
+      }
     }
   } catch (error) {
     // Extension context invalidated errors are expected when extension is reloaded
@@ -100,8 +370,13 @@ async function saveCache() {
     const expiry = now + (CACHE_EXPIRY_DAYS * 24 * 60 * 60 * 1000);
     
     for (const [username, location] of locationCache.entries()) {
+      const normalized = normalizeLocationData(location);
+      if (!normalized) {
+        continue;
+      }
+
       cacheObj[username] = {
-        location: location,
+        data: normalized,
         expiry: expiry,
         cachedAt: now
       };
@@ -119,6 +394,14 @@ async function saveCache() {
   }
 }
 
+// Check if a cache entry is expired
+function isCacheEntryExpired(cacheEntry) {
+  if (!cacheEntry || !cacheEntry.expiry) {
+    return true; // Treat missing expiry as expired
+  }
+  return cacheEntry.expiry <= Date.now();
+}
+
 // Save a single entry to cache
 async function saveCacheEntry(username, location) {
   // Check if extension context is still valid
@@ -127,7 +410,16 @@ async function saveCacheEntry(username, location) {
     return;
   }
   
-  locationCache.set(username, location);
+  const normalized = normalizeLocationData(location);
+  if (!normalized) {
+    return;
+  }
+
+  // Store with expiry timestamp
+  const now = Date.now();
+  const expiry = now + (CACHE_EXPIRY_DAYS * 24 * 60 * 60 * 1000);
+  locationCache.set(username, { ...normalized, expiry });
+  
   // Debounce saves - only save every 5 seconds
   if (!saveCache.timeout) {
     saveCache.timeout = setTimeout(async () => {
@@ -150,9 +442,25 @@ function injectPageScript() {
   window.addEventListener('message', (event) => {
     if (event.source !== window) return;
     if (event.data && event.data.type === '__rateLimitInfo') {
-      rateLimitResetTime = event.data.resetTime;
-      const waitTime = event.data.waitTime;
-      console.log(`Rate limit detected. Will resume requests in ${Math.ceil(waitTime / 1000 / 60)} minutes`);
+      const { resetTime, resetTimestampMs, waitTime = 0 } = event.data;
+      const nowMs = Date.now();
+      const nowSeconds = Math.floor(nowMs / 1000);
+
+      if (typeof resetTime === 'number' && resetTime > 0) {
+        rateLimitResetTime = Math.max(rateLimitResetTime, resetTime);
+      }
+
+      if (typeof resetTimestampMs === 'number' && resetTimestampMs > 0) {
+        rateLimitResetTime = Math.max(rateLimitResetTime, Math.floor(resetTimestampMs / 1000));
+      }
+
+      const waitSeconds = Math.ceil(waitTime / 1000);
+      if (waitSeconds > 0) {
+        rateLimitResetTime = Math.max(rateLimitResetTime, Math.floor((nowMs + waitTime) / 1000));
+      }
+
+      const minutes = Math.max(1, Math.ceil((rateLimitResetTime - nowSeconds) / 60));
+      console.log(`Rate limit detected. Will resume requests in ${minutes} minutes`);
     }
   });
 }
@@ -213,6 +521,16 @@ async function processRequestQueue() {
 // Make actual API request
 function makeLocationRequest(screenName) {
   return new Promise((resolve, reject) => {
+    const nowSeconds = Math.floor(Date.now() / 1000);
+    if (rateLimitResetTime > nowSeconds) {
+      const delay = Math.max((rateLimitResetTime - nowSeconds) * 1000, 1000);
+      console.log(`Deferring request for ${screenName} for ${Math.ceil(delay / 1000)}s due to rate limit.`);
+      setTimeout(() => {
+        makeLocationRequest(screenName).then(resolve).catch(reject);
+      }, delay);
+      return;
+    }
+
     const requestId = Date.now() + Math.random();
     
     // Listen for response via postMessage
@@ -225,17 +543,25 @@ function makeLocationRequest(screenName) {
           event.data.screenName === screenName && 
           event.data.requestId === requestId) {
         window.removeEventListener('message', handler);
-        const location = event.data.location;
+        const locationData = event.data.locationData ?? event.data.location ?? null;
         const isRateLimited = event.data.isRateLimited || false;
         
+        let normalized = null;
+        if (locationData) {
+          normalized = normalizeLocationData(locationData);
+        }
+
         // Only cache if not rate limited (don't cache failures due to rate limiting)
-        if (!isRateLimited) {
-          saveCacheEntry(screenName, location || null);
-        } else {
-          console.log(`Not caching null for ${screenName} due to rate limit`);
+        if (!isRateLimited && normalized) {
+          saveCacheEntry(screenName, normalized);
+        } else if (isRateLimited) {
+          console.log(`Not caching data for ${screenName} due to rate limit`);
+          const enforcedReset = Math.floor(Date.now() / 1000) + 60; // wait at least 1 minute
+          rateLimitResetTime = Math.max(rateLimitResetTime, enforcedReset);
+          setTimeout(processRequestQueue, 1000);
         }
         
-        resolve(location || null);
+        resolve(normalized);
       }
     };
     window.addEventListener('message', handler);
@@ -262,13 +588,21 @@ async function getUserLocation(screenName) {
   // Check cache first
   if (locationCache.has(screenName)) {
     const cached = locationCache.get(screenName);
-    // Don't return cached null - retry if it was null before (might have been rate limited)
-    if (cached !== null) {
-      console.log(`Using cached location for ${screenName}: ${cached}`);
-      return cached;
+    
+    // Check if cache entry is expired
+    if (isCacheEntryExpired(cached)) {
+      console.log(`Cache entry expired for ${screenName}, treating as cache miss`);
+      locationCache.delete(screenName);
     } else {
-      console.log(`Found null in cache for ${screenName}, will retry API call`);
-      // Remove from cache to allow retry
+      const normalized = normalizeLocationData(cached);
+      if (normalized) {
+        const displayInfo = buildLocationDisplayInfo(normalized);
+        if (displayInfo) {
+          console.log(`Using cached location for ${screenName}:`, displayInfo);
+          return displayInfo;
+        }
+      }
+      // Remove invalid cache entry to allow retry
       locationCache.delete(screenName);
     }
   }
@@ -278,6 +612,17 @@ async function getUserLocation(screenName) {
   return new Promise((resolve, reject) => {
     requestQueue.push({ screenName, resolve, reject });
     processRequestQueue();
+  }).then(data => {
+    if (!data) {
+      return null;
+    }
+
+    const normalized = normalizeLocationData(data);
+    if (!normalized) {
+      return null;
+    }
+
+    return buildLocationDisplayInfo(normalized);
   });
 }
 
@@ -413,10 +758,18 @@ function createLoadingShimmer() {
   shimmer.style.animation = 'shimmer 1.5s infinite';
   
   // Add animation keyframes if not already added
-  if (!document.getElementById('twitter-flag-shimmer-style')) {
+  injectAnimationStyles();
+  
+  return shimmer;
+}
+
+// Inject CSS animation styles for button and shimmer animations
+function injectAnimationStyles() {
+  if (!document.getElementById('twitter-flag-animation-styles')) {
     const style = document.createElement('style');
-    style.id = 'twitter-flag-shimmer-style';
+    style.id = 'twitter-flag-animation-styles';
     style.textContent = `
+      /* Shimmer animation for loading state */
       @keyframes shimmer {
         0% {
           background-position: -200% 0;
@@ -425,11 +778,292 @@ function createLoadingShimmer() {
           background-position: 200% 0;
         }
       }
+      
+      /* Button hover animation */
+      @keyframes button-pulse {
+        0%, 100% {
+          transform: scale(1);
+        }
+        50% {
+          transform: scale(1.05);
+        }
+      }
+      
+      /* Smooth button appearance */
+      @keyframes button-fade-in {
+        from {
+          opacity: 0;
+          transform: scale(0.8);
+        }
+        to {
+          opacity: 0.6;
+          transform: scale(1);
+        }
+      }
+      
+      /* Button click animation */
+      @keyframes button-click {
+        0% {
+          transform: scale(1);
+        }
+        50% {
+          transform: scale(0.9);
+        }
+        100% {
+          transform: scale(1);
+        }
+      }
+      
+      /* Apply fade-in animation to buttons */
+      .twitter-location-button {
+        animation: button-fade-in 0.3s ease-out;
+      }
+      
+      /* Ensure smooth transitions */
+      .twitter-location-button,
+      [data-twitter-flag-wrapper],
+      [data-twitter-flag-shimmer],
+      [data-twitter-flag-error] {
+        transition: opacity 0.2s ease, transform 0.2s ease;
+      }
     `;
     document.head.appendChild(style);
   }
+}
+
+// Create button-link for manual mode
+function createLocationButton(screenName) {
+  // Ensure animation styles are injected
+  injectAnimationStyles();
   
-  return shimmer;
+  const button = document.createElement('button');
+  button.className = 'twitter-location-button';
+  button.setAttribute('data-twitter-location-button', 'true');
+  button.setAttribute('data-screen-name', screenName);
+  button.setAttribute('aria-label', `Show location for @${screenName}`);
+  button.title = 'Click to show account location';
+  
+  // Icon: location pin
+  button.innerHTML = '📍';
+  
+  // Styling to match Twitter UI - using inline styles for specificity
+  button.style.cssText = `
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 20px;
+    height: 20px;
+    margin-left: 4px;
+    margin-right: 4px;
+    padding: 0;
+    border: none;
+    background: transparent;
+    cursor: pointer;
+    font-size: 14px;
+    opacity: 0.6;
+    transition: opacity 0.2s ease, transform 0.2s ease;
+    vertical-align: middle;
+    flex-shrink: 0;
+  `;
+  
+  // Hover effect with smooth animation
+  button.addEventListener('mouseenter', () => {
+    button.style.opacity = '1';
+    button.style.transform = 'scale(1.1)';
+  });
+  
+  button.addEventListener('mouseleave', () => {
+    button.style.opacity = '0.6';
+    button.style.transform = 'scale(1)';
+  });
+  
+  // Click handler with click animation
+  button.addEventListener('click', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    
+    // Add click animation
+    button.style.animation = 'button-click 0.2s ease';
+    setTimeout(() => {
+      button.style.animation = '';
+    }, 200);
+    
+    handleButtonClick(button, screenName);
+  });
+  
+  return button;
+}
+
+// Handle button click in manual mode
+async function handleButtonClick(button, screenName) {
+  // Replace button with loading shimmer
+  const shimmer = createLoadingShimmer();
+  button.replaceWith(shimmer);
+  
+  try {
+    // Fetch location data
+    const locationInfo = await getUserLocation(screenName);
+    
+    if (locationInfo) {
+      // Replace shimmer with location display on success
+      const flagWrapper = buildBracketedDisplay(locationInfo);
+      shimmer.replaceWith(flagWrapper);
+      
+      // Mark container as processed after successful display
+      const container = findContainerForUsername(screenName);
+      if (container) {
+        container.dataset.flagAdded = 'true';
+        console.log(`✓ Successfully displayed location for ${screenName} via button click`);
+      }
+    } else {
+      // Replace shimmer with error indicator on failure
+      const errorIcon = createErrorIndicator();
+      shimmer.replaceWith(errorIcon);
+      console.log(`✗ Failed to fetch location for ${screenName}`);
+    }
+  } catch (error) {
+    // Replace shimmer with error indicator on error
+    console.error(`Error fetching location for ${screenName}:`, error);
+    const errorIcon = createErrorIndicator();
+    shimmer.replaceWith(errorIcon);
+  }
+}
+
+// Helper function to find container for a username
+function findContainerForUsername(screenName) {
+  const containers = document.querySelectorAll('article[data-testid="tweet"], [data-testid="UserCell"], [data-testid="User-Names"], [data-testid="User-Name"]');
+  
+  for (const container of containers) {
+    const username = extractUsername(container);
+    if (username === screenName) {
+      return container;
+    }
+  }
+  
+  return null;
+}
+
+// Create error indicator for failed location fetches
+function createErrorIndicator() {
+  const span = document.createElement('span');
+  span.setAttribute('data-twitter-flag-error', 'true');
+  span.textContent = '⚠️';
+  span.title = 'Failed to load location data';
+  span.style.cssText = `
+    display: inline-flex;
+    align-items: center;
+    font-size: 14px;
+    margin-left: 4px;
+    margin-right: 4px;
+    opacity: 0.5;
+    vertical-align: middle;
+  `;
+  return span;
+}
+
+// Add button to username in manual mode
+function addButtonToUsername(container, screenName) {
+  // Mark as processing to avoid duplicates
+  if (container.dataset.flagAdded) {
+    return;
+  }
+  container.dataset.flagAdded = 'button';
+  
+  // Find User-Name container
+  const userNameContainer = container.querySelector('[data-testid="UserName"], [data-testid="User-Name"]');
+  if (!userNameContainer) {
+    console.error(`Could not find UserName container for ${screenName}`);
+    return;
+  }
+  
+  // Create button
+  const button = createLocationButton(screenName);
+  
+  // Insert button using same strategy as flag insertion (findHandleSection)
+  const handleSection = findHandleSection(userNameContainer, screenName);
+  
+  if (handleSection && handleSection.parentNode) {
+    try {
+      handleSection.parentNode.insertBefore(button, handleSection);
+      console.log(`✓ Inserted button for ${screenName}`);
+    } catch (e) {
+      console.error('Failed to insert button:', e);
+      // Fallback: append to userNameContainer
+      try {
+        userNameContainer.appendChild(button);
+        console.log(`✓ Inserted button (fallback) for ${screenName}`);
+      } catch (e2) {
+        console.error('Failed to insert button (fallback):', e2);
+      }
+    }
+  } else {
+    // Fallback: append to userNameContainer
+    try {
+      userNameContainer.appendChild(button);
+      console.log(`✓ Inserted button (fallback) for ${screenName}`);
+    } catch (e) {
+      console.error('Failed to insert button (fallback):', e);
+    }
+  }
+}
+
+// Helper function to display location info (for cached data in manual mode)
+async function displayLocationInfo(container, screenName, displayInfo) {
+  // Mark as processing to avoid duplicates
+  container.dataset.flagAdded = 'processing';
+  
+  // Build bracketed display using buildBracketedDisplay()
+  const flagWrapper = buildBracketedDisplay(displayInfo);
+  if (!flagWrapper) {
+    container.dataset.flagAdded = 'failed';
+    console.error(`Unable to build display for ${screenName}`);
+    return;
+  }
+  
+  // Find User-Name container
+  const userNameContainer = container.querySelector('[data-testid="UserName"], [data-testid="User-Name"]');
+  if (!userNameContainer) {
+    container.dataset.flagAdded = 'failed';
+    console.error(`Could not find UserName container for ${screenName}`);
+    return;
+  }
+  
+  // Insert flag using same positioning strategy as addFlagToUsername (findHandleSection)
+  const handleSection = findHandleSection(userNameContainer, screenName);
+  
+  if (handleSection && handleSection.parentNode) {
+    try {
+      handleSection.parentNode.insertBefore(flagWrapper, handleSection);
+      container.dataset.flagAdded = 'true';
+      console.log(`✓ Displayed cached location for ${screenName}`);
+    } catch (e) {
+      console.error('Failed to insert flag:', e);
+      // Fallback: append to userNameContainer
+      try {
+        userNameContainer.appendChild(flagWrapper);
+        container.dataset.flagAdded = 'true';
+        console.log(`✓ Displayed cached location (fallback) for ${screenName}`);
+      } catch (e2) {
+        console.error('Failed to insert flag (fallback):', e2);
+        container.dataset.flagAdded = 'failed';
+      }
+    }
+  } else {
+    // Fallback: append to userNameContainer
+    try {
+      userNameContainer.appendChild(flagWrapper);
+      container.dataset.flagAdded = 'true';
+      console.log(`✓ Displayed cached location (fallback) for ${screenName}`);
+    } catch (e) {
+      console.error('Failed to insert flag (fallback):', e);
+      container.dataset.flagAdded = 'failed';
+    }
+  }
+}
+
+// Export for testing
+if (typeof module !== 'undefined' && module.exports) {
+  module.exports = { createLocationButton, createErrorIndicator, handleButtonClick, addButtonToUsername, displayLocationInfo };
 }
 
 // Function to add flag to username element
@@ -493,33 +1127,26 @@ async function addFlagToUsername(usernameElement, screenName) {
     console.log(`Processing flag for ${screenName}...`);
 
     // Get location
-    const location = await getUserLocation(screenName);
-    console.log(`Location for ${screenName}:`, location);
+    const locationInfo = await getUserLocation(screenName);
+    console.log(`Location info for ${screenName}:`, locationInfo);
     
     // Remove shimmer
     if (shimmerInserted && shimmerSpan.parentNode) {
       shimmerSpan.remove();
     }
     
-    if (!location) {
-      console.log(`No location found for ${screenName}, marking as failed`);
+    if (!locationInfo) {
+      console.log(`No location data found for ${screenName}, marking as failed`);
       usernameElement.dataset.flagAdded = 'failed';
       return;
     }
 
-  // Get flag emoji
-  const flag = getCountryFlag(location);
-  if (!flag) {
-    console.log(`No flag found for location: ${location}`);
-    // Shimmer already removed above, but ensure it's gone
-    if (shimmerInserted && shimmerSpan.parentNode) {
-      shimmerSpan.remove();
-    }
+  const flagWrapper = buildBracketedDisplay(locationInfo);
+  if (!flagWrapper || !flagWrapper.childElementCount) {
+    console.log(`Unable to build display for ${screenName}`);
     usernameElement.dataset.flagAdded = 'failed';
     return;
   }
-  
-  console.log(`Found flag ${flag} for ${screenName} (${location})`);
 
   // Find the username link - try multiple strategies
   // Priority: Find the @username link, not the display name link
@@ -606,7 +1233,7 @@ async function addFlagToUsername(usernameElement, screenName) {
   console.log(`Found username link for ${screenName}:`, usernameLink.href, usernameLink.textContent?.trim());
 
   // Check if flag already exists (check in the entire container, not just parent)
-  const existingFlag = usernameElement.querySelector('[data-twitter-flag]');
+  const existingFlag = usernameElement.querySelector('[data-twitter-flag-wrapper], [data-twitter-flag]');
   if (existingFlag) {
     // Remove shimmer if flag already exists
     if (shimmerInserted && shimmerSpan.parentNode) {
@@ -617,17 +1244,45 @@ async function addFlagToUsername(usernameElement, screenName) {
   }
 
   // Add flag emoji - place it next to verification badge, before @ handle
-  const flagSpan = document.createElement('span');
-  flagSpan.textContent = ` ${flag}`;
-  flagSpan.setAttribute('data-twitter-flag', 'true');
-  flagSpan.style.marginLeft = '4px';
-  flagSpan.style.marginRight = '4px';
-  flagSpan.style.display = 'inline';
-  flagSpan.style.color = 'inherit';
-  flagSpan.style.verticalAlign = 'middle';
+  const flagSpan = flagWrapper;
   
   // Use userNameContainer found above, or find it if not found
-  const containerForFlag = userNameContainer || usernameElement.querySelector('[data-testid="UserName"], [data-testid="User-Name"]');
+  let containerForFlag = userNameContainer;
+
+  if (!containerForFlag) {
+    const ownContainer = usernameElement.closest('[data-testid="UserName"], [data-testid="User-Name"]');
+    if (ownContainer && Array.from(ownContainer.querySelectorAll('a[href^="/"]')).some(link => {
+      const href = link.getAttribute('href');
+      const match = href?.match(/^\/([^\/\?]+)/);
+      return match && match[1] === screenName;
+    })) {
+      containerForFlag = ownContainer;
+    }
+  }
+
+  if (!containerForFlag) {
+    const handles = usernameElement.querySelectorAll('[data-testid="UserName"], [data-testid="User-Name"]');
+    if (handles.length === 1) {
+      containerForFlag = handles[0];
+    } else if (handles.length > 1) {
+      containerForFlag = Array.from(handles).find(handle => {
+        const handleLink = handle.querySelector(`a[href="/${screenName}"], a[href^="/${screenName}?"]`);
+        return Boolean(handleLink);
+      }) || handles[0];
+    }
+  }
+
+  if (!containerForFlag) {
+    containerForFlag = usernameElement.querySelector('[data-testid="UserName"], [data-testid="User-Name"]');
+  }
+
+  if (!containerForFlag) {
+    if (usernameElement.matches('[data-testid="UserName"], [data-testid="User-Name"]')) {
+      containerForFlag = usernameElement;
+    } else {
+      containerForFlag = usernameElement.closest('[data-testid="UserName"], [data-testid="User-Name"]') || usernameElement;
+    }
+  }
   
   if (!containerForFlag) {
     console.error(`Could not find UserName container for ${screenName}`);
@@ -721,7 +1376,7 @@ async function addFlagToUsername(usernameElement, screenName) {
     if (inserted) {
       // Mark as processed
       usernameElement.dataset.flagAdded = 'true';
-      console.log(`✓ Successfully added flag ${flag} for ${screenName} (${location})`);
+      console.log(`✓ Successfully added indicators for ${screenName}`);
       
       // Also mark any other containers waiting for this username
       const waitingContainers = document.querySelectorAll(`[data-flag-added="waiting"]`);
@@ -757,12 +1412,20 @@ async function addFlagToUsername(usernameElement, screenName) {
 
 // Function to remove all flags (when extension is disabled)
 function removeAllFlags() {
-  const flags = document.querySelectorAll('[data-twitter-flag]');
+  const flags = document.querySelectorAll('[data-twitter-flag], [data-twitter-flag-wrapper]');
   flags.forEach(flag => flag.remove());
   
   // Also remove any loading shimmers
   const shimmers = document.querySelectorAll('[data-twitter-flag-shimmer]');
   shimmers.forEach(shimmer => shimmer.remove());
+  
+  // Also remove button-links
+  const buttons = document.querySelectorAll('[data-twitter-location-button]');
+  buttons.forEach(button => button.remove());
+  
+  // Also remove error indicators
+  const errors = document.querySelectorAll('[data-twitter-flag-error]');
+  errors.forEach(error => error.remove());
   
   // Reset flag added markers
   const containers = document.querySelectorAll('[data-flag-added]');
@@ -773,6 +1436,86 @@ function removeAllFlags() {
   console.log('Removed all flags');
 }
 
+// Handle mode change
+async function handleModeChange(newMode) {
+  console.log(`Handling mode change to: ${newMode}`);
+  
+  if (newMode === MODE_AUTO) {
+    // Switching to AUTO: find all button-links, check cache, fetch or display
+    const buttons = document.querySelectorAll('[data-twitter-location-button]');
+    
+    for (const button of buttons) {
+      const screenName = button.getAttribute('data-screen-name');
+      if (!screenName) continue;
+      
+      // Find the container for this username
+      const container = findContainerForUsername(screenName);
+      if (!container) continue;
+      
+      // Remove the button
+      button.remove();
+      
+      // Reset the container's flag status
+      delete container.dataset.flagAdded;
+      
+      // Check cache first
+      const cachedLocation = locationCache.get(screenName);
+      
+      if (cachedLocation) {
+        // Display cached data
+        const normalized = normalizeLocationData(cachedLocation);
+        if (normalized) {
+          const displayInfo = buildLocationDisplayInfo(normalized);
+          if (displayInfo) {
+            await displayLocationInfo(container, screenName, displayInfo);
+            continue;
+          }
+        }
+      }
+      
+      // No cache - fetch automatically in auto mode
+      addFlagToUsername(container, screenName).catch(err => {
+        console.error(`Error processing ${screenName} after mode change:`, err);
+        container.dataset.flagAdded = 'failed';
+      });
+    }
+  } else {
+    // Switching to MANUAL: find all flags for uncached usernames, replace with buttons
+    const containers = document.querySelectorAll('article[data-testid="tweet"], [data-testid="UserCell"], [data-testid="User-Names"], [data-testid="User-Name"]');
+    
+    for (const container of containers) {
+      const screenName = extractUsername(container);
+      if (!screenName) continue;
+      
+      // Check if this username has cached data
+      const cachedLocation = locationCache.get(screenName);
+      
+      // If there's a flag wrapper but no cached data, replace with button
+      const flagWrapper = container.querySelector('[data-twitter-flag-wrapper]');
+      
+      if (flagWrapper && !cachedLocation) {
+        // Remove the flag
+        flagWrapper.remove();
+        
+        // Reset the container's flag status
+        delete container.dataset.flagAdded;
+        
+        // Add button instead
+        addButtonToUsername(container, screenName);
+      }
+      
+      // If there's cached data, keep the flag (don't replace with button)
+      // If there's already a button, keep it
+      // If there's nothing, the next processUsernames call will handle it
+    }
+  }
+  
+  // Re-process visible usernames with new mode
+  setTimeout(() => {
+    processUsernames();
+  }, 500);
+}
+
 // Function to process all username elements on the page
 async function processUsernames() {
   // Check if extension is enabled
@@ -780,10 +1523,13 @@ async function processUsernames() {
     return;
   }
   
+  // Load current displayMode at start of function
+  await loadDisplayMode();
+  
   // Find all tweet/article containers and user cells
   const containers = document.querySelectorAll('article[data-testid="tweet"], [data-testid="UserCell"], [data-testid="User-Names"], [data-testid="User-Name"]');
   
-  console.log(`Processing ${containers.length} containers for usernames`);
+  console.log(`Processing ${containers.length} containers for usernames in ${displayMode} mode`);
   
   let foundCount = 0;
   let processedCount = 0;
@@ -794,15 +1540,47 @@ async function processUsernames() {
     if (screenName) {
       foundCount++;
       const status = container.dataset.flagAdded;
-      if (!status || status === 'failed') {
-        processedCount++;
-        // Process in parallel but limit concurrency
+      
+      // Skip if already processed (true, processing, waiting, or button)
+      if (status === 'true' || status === 'processing' || status === 'waiting' || status === 'button') {
+        skippedCount++;
+        continue;
+      }
+      
+      processedCount++;
+      
+      // Check cache first for all usernames (regardless of mode)
+      const cachedLocation = locationCache.get(screenName);
+      
+      if (cachedLocation) {
+        // Check if cache entry is expired
+        if (isCacheEntryExpired(cachedLocation)) {
+          console.log(`Cache entry expired for ${screenName}, treating as cache miss`);
+          locationCache.delete(screenName);
+          // Continue to mode-specific logic below (will show button in manual mode or fetch in auto mode)
+        } else {
+          // If cached data exists and is not expired, call displayLocationInfo() for both modes
+          const normalized = normalizeLocationData(cachedLocation);
+          if (normalized) {
+            const displayInfo = buildLocationDisplayInfo(normalized);
+            if (displayInfo) {
+              await displayLocationInfo(container, screenName, displayInfo);
+              continue;
+            }
+          }
+        }
+      }
+      
+      // No cache - behavior depends on mode
+      if (displayMode === MODE_AUTO) {
+        // If no cache and mode is AUTO, call addFlagToUsername() (existing behavior)
         addFlagToUsername(container, screenName).catch(err => {
           console.error(`Error processing ${screenName}:`, err);
           container.dataset.flagAdded = 'failed';
         });
       } else {
-        skippedCount++;
+        // If no cache and mode is MANUAL, call addButtonToUsername() (new behavior)
+        addButtonToUsername(container, screenName);
       }
     } else {
       // Debug: log containers that don't have usernames
@@ -858,6 +1636,9 @@ async function init() {
   
   // Load enabled state first
   await loadEnabledState();
+  
+  // Load display mode before processing usernames
+  await loadDisplayMode();
   
   // Load persistent cache
   await loadCache();

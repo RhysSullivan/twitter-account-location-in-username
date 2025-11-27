@@ -74,6 +74,47 @@
       padding-top: 12px;
       border-top: 1px solid #eff3f4;
     }
+    .mode-container {
+      padding: 12px;
+      background: #f7f9f9;
+      border-radius: 8px;
+      margin-bottom: 12px;
+    }
+    .mode-label {
+      display: block;
+      font-weight: 500;
+      color: #0f1419;
+      margin-bottom: 8px;
+    }
+    .mode-selector {
+      display: flex;
+      gap: 8px;
+    }
+    .mode-button {
+      flex: 1;
+      padding: 8px 12px;
+      border: 1px solid #cfd9de;
+      border-radius: 20px;
+      background: white;
+      color: #0f1419;
+      font-size: 14px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: all 0.2s;
+      font-family: inherit;
+    }
+    .mode-button:hover {
+      background: #f7f9f9;
+      border-color: #1d9bf0;
+    }
+    .mode-button.active {
+      background: #1d9bf0;
+      color: white;
+      border-color: #1d9bf0;
+    }
+    .mode-button:active {
+      transform: scale(0.98);
+    }
   </style>
 </head>
 <body>
@@ -84,6 +125,14 @@
   <div class="toggle-container">
     <span class="toggle-label">Enable Extension</span>
     <div class="toggle-switch" id="toggleSwitch"></div>
+  </div>
+  
+  <div class="mode-container">
+    <span class="mode-label">Display Mode</span>
+    <div class="mode-selector">
+      <button class="mode-button" data-mode="auto" id="autoButton">Auto</button>
+      <button class="mode-button" data-mode="manual" id="manualButton">Manual</button>
+    </div>
   </div>
   
   <div class="status" id="status">Loading...</div>

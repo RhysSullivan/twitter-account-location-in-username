@@ -1,0 +1,14 @@
+{
+  "name": "twitter-location-flag-extension",
+  "version": "1.0.0",
+  "description": "Chrome extension that displays country flag indicators next to Twitter/X usernames",
+  "scripts": {
+    "test": "vitest --run",
+    "test:watch": "vitest"
+  },
+  "devDependencies": {
+    "vitest": "^1.0.0",
+    "fast-check": "^3.15.0",
+    "happy-dom": "^12.10.3"
+  }
+}

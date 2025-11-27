@@ -117,18 +117,26 @@
           referrerPolicy: 'origin-when-cross-origin'
         });
         
-        let location = null;
+        let locationPayload = null;
         if (response.ok) {
           const data = await response.json();
           console.log(`API response for ${screenName}:`, data);
-          location = data?.data?.user_result_by_screen_name?.result?.about_profile?.account_based_in || null;
-          console.log(`Extracted location for ${screenName}:`, location);
+          const aboutProfile = data?.data?.user_result_by_screen_name?.result?.about_profile;
+          const accountBasedIn = aboutProfile?.account_based_in || null;
+          locationPayload = {
+            location: accountBasedIn,
+            source: aboutProfile?.source || null,
+            sourceCountry: aboutProfile?.source_country || null,
+            locationAccurate: aboutProfile?.location_accurate,
+            learnMoreUrl: aboutProfile?.learn_more_url || null
+          };
+          console.log(`Extracted location payload for ${screenName}:`, locationPayload);
           
           // Debug: log the full path to see what's available
-          if (!location && data?.data?.user_result_by_screen_name?.result) {
+          if (!accountBasedIn && data?.data?.user_result_by_screen_name?.result) {
             console.log('User result available but no location:', {
-              hasAboutProfile: !!data.data.user_result_by_screen_name.result.about_profile,
-              aboutProfile: data.data.user_result_by_screen_name.result.about_profile
+              hasAboutProfile: !!aboutProfile,
+              aboutProfile
             });
           }
         } else {
@@ -141,9 +149,11 @@
             const limit = response.headers.get('x-rate-limit-limit');
             
             if (resetTime) {
-              const resetDate = new Date(parseInt(resetTime) * 1000);
+              const resetEpochSeconds = parseInt(resetTime, 10);
+              const resetEpochMs = resetEpochSeconds * 1000;
+              const resetDate = new Date(resetEpochMs);
               const now = Date.now();
-              const waitTime = resetDate.getTime() - now;
+              const waitTime = resetEpochMs - now;
               
               console.log(`Rate limited! Limit: ${limit}, Remaining: ${remaining}`);
               console.log(`Rate limit resets at: ${resetDate.toLocaleString()}`);
@@ -152,7 +162,8 @@
               // Store rate limit info for content script
               window.postMessage({
                 type: '__rateLimitInfo',
-                resetTime: parseInt(resetTime),
+                resetTime: resetEpochSeconds,
+                resetTimestampMs: resetEpochMs,
                 waitTime: Math.max(0, waitTime)
               }, '*');
             }
@@ -166,7 +177,7 @@
         window.postMessage({
           type: '__locationResponse',
           screenName,
-          location,
+          locationData: locationPayload,
           requestId,
           isRateLimited: response.status === 429
         }, '*');
@@ -175,7 +186,7 @@
         window.postMessage({
           type: '__locationResponse',
           screenName,
-          location: null,
+          locationData: null,
           requestId
         }, '*');
       }
